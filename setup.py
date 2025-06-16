@@ -156,8 +156,6 @@ for capability in compute_capabilities:
         SM_FLAGS[num]+=["-gencode", f"arch=compute_{num},code=compute_{num}"]
         # NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
 
-# print(SM_FLAGS)
-
 ext_modules = []
 
 if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90 or HAS_SM120:
@@ -199,12 +197,9 @@ if HAS_SM90:
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS+SM_FLAGS['90a'],
         },
-        extra_link_args=['-lcuda'],
+        # extra_link_args=['-lcuda'],
     )
     ext_modules.append(qattn_extension)
-
-# print(ext_modules)
-# print(NVCC_FLAGS)
 
 # Fused kernels.
 fused_extension = CUDAExtension(
