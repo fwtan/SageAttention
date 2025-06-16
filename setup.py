@@ -54,6 +54,7 @@ if CUDA_HOME is None:
     raise RuntimeError(
         "Cannot find CUDA_HOME. CUDA must be available to build the package.")
 
+
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     """Get the CUDA version from nvcc.
 
@@ -66,8 +67,44 @@ def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
     return nvcc_cuda_version
 
-# Iterate over all GPUs on the current machine. Also you can modify this part to specify the architecture if you want to build for specific GPU architectures.
-compute_capabilities = set()
+
+def get_torch_arch_list() -> Set[str]:
+    # TORCH_CUDA_ARCH_LIST can have one or more architectures,
+    # e.g. "8.0" or "7.5,8.0,8.6+PTX". Here, the "8.6+PTX" option asks the
+    # compiler to additionally include PTX code that can be runtime-compiled
+    # and executed on the 8.6 or newer architectures. While the PTX code will
+    # not give the best performance on the newer architectures, it provides
+    # forward compatibility.
+    env_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
+    if env_arch_list is None:
+        return set()
+
+    # List are separated by ; or space.
+    torch_arch_list = set(env_arch_list.replace(" ", ";").split(";"))
+    if not torch_arch_list:
+        return set()
+
+    # Filter out the invalid architectures and print a warning.
+    valid_archs = SUPPORTED_ARCHS.union({s + "+PTX" for s in SUPPORTED_ARCHS})
+    arch_list = torch_arch_list.intersection(valid_archs)
+    # If none of the specified architectures are valid, raise an error.
+    if not arch_list:
+        raise RuntimeError(
+            "None of the CUDA architectures in `TORCH_CUDA_ARCH_LIST` env "
+            f"variable ({env_arch_list}) is supported. "
+            f"Supported CUDA architectures are: {valid_archs}.")
+    invalid_arch_list = torch_arch_list - valid_archs
+    if invalid_arch_list:
+        warnings.warn(
+            f"Unsupported CUDA architectures ({invalid_arch_list}) are "
+            "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
+            f"({env_arch_list}). Supported CUDA architectures are: "
+            f"{valid_archs}.")
+    return arch_list
+
+
+# First, check the TORCH_CUDA_ARCH_LIST environment variable.
+compute_capabilities = get_torch_arch_list()
 device_count = torch.cuda.device_count()
 for i in range(device_count):
     major, minor = torch.cuda.get_device_capability(i)
@@ -96,6 +133,7 @@ if nvcc_cuda_version < Version("12.8") and any(cc.startswith("12.0") for cc in c
         "CUDA 12.8 or higher is required for compute capability 12.0.")
 
 # Add target compute capabilities to NVCC flags.
+SM_FLAGS = {}
 for capability in compute_capabilities:
     if capability.startswith("8.0"):
         HAS_SM80 = True
@@ -112,9 +150,13 @@ for capability in compute_capabilities:
     elif capability.startswith("12.0"):
         HAS_SM120 = True
         num = "120" # need to use sm120a to use mxfp8/mxfp4/nvfp4 instructions.
-    NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
+    SM_FLAGS[num]=["-gencode", f"arch=compute_{num},code=sm_{num}"]
+    # NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
     if capability.endswith("+PTX"):
-        NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
+        SM_FLAGS[num]+=["-gencode", f"arch=compute_{num},code=compute_{num}"]
+        # NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
+
+# print(SM_FLAGS)
 
 ext_modules = []
 
@@ -127,7 +169,7 @@ if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90 or HAS_SM120:
         ],
         extra_compile_args={
             "cxx": CXX_FLAGS,
-            "nvcc": NVCC_FLAGS,
+            "nvcc": NVCC_FLAGS+SM_FLAGS['80'],
         },
     )
     ext_modules.append(qattn_extension)
@@ -141,7 +183,7 @@ if HAS_SM89 or HAS_SM120:
         ],
         extra_compile_args={
             "cxx": CXX_FLAGS,
-            "nvcc": NVCC_FLAGS,
+            "nvcc": NVCC_FLAGS+SM_FLAGS['89'],
         },
     )
     ext_modules.append(qattn_extension)
@@ -155,11 +197,14 @@ if HAS_SM90:
         ],
         extra_compile_args={
             "cxx": CXX_FLAGS,
-            "nvcc": NVCC_FLAGS,
+            "nvcc": NVCC_FLAGS+SM_FLAGS['90a'],
         },
         extra_link_args=['-lcuda'],
     )
     ext_modules.append(qattn_extension)
+
+# print(ext_modules)
+# print(NVCC_FLAGS)
 
 # Fused kernels.
 fused_extension = CUDAExtension(
